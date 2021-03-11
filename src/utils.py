@@ -1,19 +1,22 @@
 import torch
-from transformers import BertTokenizer
 import pandas as pd
 import os
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from keras.preprocessing.sequence import pad_sequences
-from transformers import BertForSequenceClassification, AdamW, BertConfig
+from transformers import BertTokenizer, BertForSequenceClassification, AdamW, BertConfig
 from transformers import get_linear_schedule_with_warmup
 import numpy as np
 import random
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split
+#from PyDictionary import PyDictionary
 
-device = torch.device('cpu')
 
-def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.model', show_loss=False, verbose=False):
+device = torch.device("cuda")
+
+
+def train(df, n_records_train = 50, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.model', show_loss=False, verbose=False):
     # Load the dataset into a pandas dataframe.
     '''if n_records != -1:
         df = pd.read_csv('{}'.format(training_file), delimiter=',', nrows=n_records)
@@ -29,7 +32,8 @@ def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.m
     labels = df.label.values
 
     # Tokenize the data using the BERT tokenizer
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True, cache_dir = './model/tokenizer/')
+
 
     # Tokenize all of the sentences and map the tokens to thier word IDs.
     input_ids = []
@@ -113,6 +117,7 @@ def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.m
 
     # Load BertForSequenceClassification, the pretrained BERT model with a single
     # linear classification layer on top.
+    '''
     model = BertForSequenceClassification.from_pretrained(
         "bert-base-uncased", # Use the 12-layer BERT model, with an uncased vocab.
         num_labels = 2, # The number of output labels--2 for binary classification.
@@ -120,6 +125,8 @@ def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.m
         output_attentions = False, # Whether the model returns attentions weights.
         output_hidden_states = False, # Whether the model returns all hidden-states.
     )
+    '''
+    model = torch.load('./model/untrained.model')
     # Note: AdamW is a class from the huggingface library (as opposed to pytorch)
     # I believe the 'W' stands for 'Weight Decay fix"
     optimizer = AdamW(model.parameters(),
@@ -236,8 +243,8 @@ def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.m
             # values prior to applying an activation function like the softmax.
             logits = outputs[0]
             # Move logits and labels to cpu
-            logits = logits.detach().cpu().numpy()
-            label_ids = b_labels.to('cpu').numpy()
+            logits = logits.detach().cuda().numpy()
+            label_ids = b_labels.to(device).numpy()
 
             # Calculate the accuracy for this batch of test sentences.
             tmp_eval_accuracy = flat_accuracy(logits, label_ids)
@@ -251,6 +258,7 @@ def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.m
             print("  Accuracy: {0:.2f}".format(eval_accuracy/nb_eval_steps))
 
     torch.save(model,'./model/bert.model')
+
     if verbose:
         print("")
         print("Training complete!")
@@ -268,8 +276,6 @@ def train(df, n_epochs=4, batch_size=16, max_len=256, model_file='./model/bert.m
 
 def evaluate(dft, max_len=256, batch_size=16, model_file='./model/bert.model', verbose=False):
     ############## PREPARING TEST SET DATA  ######################
-    # Load the dataset into a pandas dataframe.
-    #dft = pd.read_csv("./data/cm_test.csv", delimiter=',',nrows=100)
     # Report the number of sentences.
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
     model = torch.load(model_file)
@@ -338,8 +344,8 @@ def evaluate(dft, max_len=256, batch_size=16, model_file='./model/bert.model', v
                           attention_mask=b_input_mask)
       logits = outputs[0]
       # Move logits and labels to cpu
-      logits = logits.detach().cpu().numpy()
-      label_ids = b_labels.to('cpu').numpy()
+      logits = logits.detach().cuda().numpy()
+      label_ids = b_labels.to('cuda').numpy()
 
       # Store predictions and true labels
       predictions.append(logits)
@@ -354,11 +360,11 @@ def evaluate(dft, max_len=256, batch_size=16, model_file='./model/bert.model', v
     flat_true_labels = [item for sublist in true_labels for item in sublist]
     # Calculate the MCC
     acc = accuracy_score(flat_true_labels, flat_predictions)
-    if verbose:
-        print('Accuracy: %.3f' % acc)
-    return acc
+    print('Accuracy: %.3f' % acc)
+    cm  = confusion_matrix(flat_true_labels, flat_predictions)
+    print(cm)
 
-def character_level_attack(sentence, fraction_changed=0.15):
+def character_level_attack(sentence, fraction_changed=0.05):
     PUNCTUATION = [' ', '.', ',', '\'', '!', '?', '\"', '-']
     ALPHA = list("abcedfghijklmnopqrstuvwxyz")
     changed_indices = []
@@ -382,3 +388,79 @@ def character_level_attack(sentence, fraction_changed=0.15):
 def character_level_attack_df(df, fraction_changed=0.15):
     for i, row in df.iterrows():
         df['input'][i] = character_level_attack(row['input'].lower())
+    return df
+
+
+def binary_word_swap_attack(sentence):
+    PUNCTUATION = ['.', ',', '!', '?']
+    sentences = sentence.split(' ')
+    i1 = np.random.randint(len(sentences))
+    if i1 == 0:
+        i2 = 1
+    else:
+        i2 = i1 - 1
+
+    word1 = sentences[i1]
+    word1_puncindex = len(word1)
+    word2 = sentences[i2]
+    word2_puncindex = len(word2)
+
+    for sym in PUNCTUATION:
+        if sym in word1:
+            if word1.index(sym) < word1_puncindex:
+                word1_puncindex = word1.index(sym)
+        if sym in word2:
+            if word2.index(sym) < word2_puncindex:
+                word2_puncindex = word2.index(sym)
+    newword1 = word2[:word2_puncindex]+word1[word1_puncindex:]
+    newword2 = word1[:word1_puncindex]+word2[word2_puncindex:]
+    sentences[i1] =  newword1
+    sentences[i2] = newword2
+
+    sentence = ' '.join(sentences)
+
+    return sentence
+
+def binary_word_swap_attack_df(df):
+    for i, row in df.iterrows():
+        df['input'][i] = binary_word_swap_attack(row['input'].lower())
+    return df
+
+'''
+def syn_attack(sentence):
+    stop_words = ["i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves", "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just", "dont", "should", "now"]
+    PUNCTUATION = [' ', '.', ',', '\'', '!', '?', '\"', '-']
+    sentence = sentence.lower()
+    sentences = sentence.split(' ')
+    i = np.random.randint(len(sentences))
+    word = sentences[i]
+    word_puncindex = len(word)
+
+    for sym in PUNCTUATION:
+        if sym in word:
+            if word.index(sym) < word_puncindex:
+                word_puncindex = word.index(sym)
+
+    # check if the chosen word is a stop word. If it is, choose again.
+    while word in stop_words:
+        i = np.random.randint(len(sentences))
+        word = sentences[i]
+        word_puncindex = len(word)
+
+        for sym in PUNCTUATION:
+            if sym in word:
+                if word.index(sym) < word_puncindex:
+                    word_puncindex = word.index(sym)
+    word = word[:word_puncindex]
+    dictionary = PyDictionary()
+    synonyms = dictionary.synonym(word)
+    synword = synonyms[0]
+    sentences[i] = synword + sentences[i][word_puncindex:]
+    sentence = " ".join(sentences)
+    return  sentence
+
+def syn_attack_df(df):
+    for i, row in df.iterrows():
+        df['input'][i] = syn_attack(row['input'])
+    return df
+    '''
